@@ -8,11 +8,10 @@ late_fusion:
 
 gnm: 
   config_path: "../../train/config/gnm.yaml"
-  ckpt_path: "../model_weights/gnm_large.pth"
+  ckpt_path: "../model_weights/gnm.pth"
 
 nomad: 
   config_path: "../../train/config/nomad.yaml"
   ckpt_path: "../model_weights/nomad.pth"
-
 
 # add your own model configs here after saving the *.pth file to ../model_weight

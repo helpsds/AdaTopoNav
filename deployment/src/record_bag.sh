@@ -16,7 +16,7 @@ tmux send-keys "roslaunch vint_locobot.launch" Enter
 
 # Run the teleop.py script in the second pane
 tmux select-pane -t 1
-tmux send-keys "conda activate vint_deployment" Enter
+tmux send-keys "conda activate nomad_train" Enter
 tmux send-keys "python joy_teleop.py" Enter
 
 # Change the directory to ../topomaps/bags and run the rosbag record command in the third pane
