@@ -1,6 +1,14 @@
+
 import argparse
 import os
-from utils import msg_to_pil 
+import shutil
+
+# Add the repository-local train and diffusion_policy packages to sys.path
+# before importing deployment utilities. This keeps the script runnable
+# directly from deployment/src without requiring a manual PYTHONPATH export.
+from deployment_bootstrap import VISUALNAV_ROOT  # noqa: F401
+
+from utils import msg_to_pil
 import time
 
 # ROS
@@ -8,7 +16,10 @@ import rospy
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import Joy
 
-IMAGE_TOPIC = "/usb_cam/image_raw"
+# IMAGE_TOPIC = "/camera_node/camera/image"
+
+DEFAULT_IMAGE_TOPIC = "/camera/color/image_raw"
+#仿真相机话题：/camera/color/image_raw
 TOPOMAP_IMAGES_DIR = "../topomaps/images"
 obs_img = None
 
@@ -39,7 +50,7 @@ def main(args: argparse.Namespace):
     global obs_img
     rospy.init_node("CREATE_TOPOMAP", anonymous=False)
     image_curr_msg = rospy.Subscriber(
-        IMAGE_TOPIC, Image, callback_obs, queue_size=1)
+        args.image_topic, Image, callback_obs, queue_size=1)
     subgoals_pub = rospy.Publisher(
         "/subgoals", Image, queue_size=1)
     joy_sub = rospy.Subscriber("joy", Joy, callback_joy)
@@ -50,11 +61,11 @@ def main(args: argparse.Namespace):
     else:
         print(f"{topomap_name_dir} already exists. Removing previous images...")
         remove_files_in_dir(topomap_name_dir)
-        
+
 
     assert args.dt > 0, "dt must be positive"
     rate = rospy.Rate(1/args.dt)
-    print("Registered with master node. Waiting for images...")
+    print(f"Registered with master node. Waiting for images on {args.image_topic}...")
     i = 0
     start_time = float("inf")
     while not rospy.is_shutdown():
@@ -66,13 +77,21 @@ def main(args: argparse.Namespace):
             start_time = time.time()
             obs_img = None
         if time.time() - start_time > 2 * args.dt:
-            print(f"Topic {IMAGE_TOPIC} not publishing anymore. Shutting down...")
+            print(f"Topic {args.image_topic} not publishing anymore. Shutting down...")
             rospy.signal_shutdown("shutdown")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description=f"Code to generate topomaps from the {IMAGE_TOPIC} topic"
+        description="Code to generate a topomap from a ROS image topic"
+    )
+    parser.add_argument(
+        "--image-topic",
+        default=DEFAULT_IMAGE_TOPIC,
+        help=(
+            "image topic to sample; use a remapped bag-only topic when Gazebo "
+            "is publishing the live camera at the same time"
+        ),
     )
     parser.add_argument(
         "--dir",
@@ -86,7 +105,7 @@ if __name__ == "__main__":
         "-t",
         default=1.,
         type=float,
-        help=f"time between images sampled from the {IMAGE_TOPIC} topic (default: 3.0)",
+        help="time between sampled images in seconds (default: 1.0)",
     )
     args = parser.parse_args()
 

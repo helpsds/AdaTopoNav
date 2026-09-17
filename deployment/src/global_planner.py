@@ -4,18 +4,34 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 from sensor_msgs.msg import Image
-from std_msgs.msg import Int32
+from std_msgs.msg import Bool, Int32
 from nav_msgs.msg import Odometry
 import os
+import time
 from PIL import Image as PILImage
 import networkx as nx
 
 class GlobalPlanner:
-    def __init__(self, map_name, goal_node=-1):
+    def __init__(
+        self,
+        map_name,
+        goal_node=-1,
+        map_root=None,
+        goal_distance=0.45,
+        goal_confirmations=3,
+        timeout=0.0,
+        lookahead=3,
+        vlos_threshold=0.85,
+        enable_vlos=True,
+    ):
         rospy.init_node('global_topological_planner', anonymous=True)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        base_dir = os.path.expanduser(f"~/visualnav-transformer/deployment/topomaps")
+        base_dir = os.path.abspath(
+            os.path.expanduser(
+                map_root or os.path.join(os.path.dirname(__file__), "..", "topomaps")
+            )
+        )
         self.map_vectors = torch.load(f"{base_dir}/{map_name}_vectors.pt", map_location=self.device)
         self.map_poses = torch.load(f"{base_dir}/{map_name}_poses.pt").to(self.device)
         
@@ -30,7 +46,19 @@ class GlobalPlanner:
         self.img_dir = f"{base_dir}/images/{map_name}/"
         
         self.goal_node = self.total_nodes - 1 if goal_node == -1 else goal_node
-        if self.goal_node >= self.total_nodes: self.goal_node = self.total_nodes - 1
+        self.goal_node = min(max(self.goal_node, 0), self.total_nodes - 1)
+        self.goal_distance = goal_distance
+        self.goal_confirmations = max(1, goal_confirmations)
+        self.goal_confirmation_count = 0
+        self.timeout = timeout
+        # Start the navigation timeout only after heavyweight model loading
+        # and ROS setup complete. Use wall time so Gazebo real-time factor
+        # cannot make a 240-second trial expire during DINOv2 loading.
+        self.start_wall_time = None
+        self.lookahead = max(1, lookahead)
+        self.vlos_threshold = vlos_threshold
+        self.enable_vlos = enable_vlos
+        self.finished = False
 
         self.graph = nx.Graph()
         self.graph.add_nodes_from(range(self.total_nodes))
@@ -54,8 +82,16 @@ class GlobalPlanner:
 
         self.goal_image_pub = rospy.Publisher("/topoplan/target_image", Image, queue_size=1)
         self.node_pub = rospy.Publisher("/topoplan/current_node", Int32, queue_size=1)
+        self.goal_reached_pub = rospy.Publisher(
+            "/topoplan/planner_goal_reached", Bool, queue_size=1, latch=True
+        )
+        # Reset the latched result at the beginning of every trial. Without
+        # this, a navigation node can consume True left by the preceding
+        # trial and shut down before publishing its first waypoint.
+        self.goal_reached_pub.publish(False)
         self.image_sub = rospy.Subscriber("/camera/color/image_raw", Image, self.image_callback, queue_size=1)
         self.odom_sub = rospy.Subscriber("/odom", Odometry, self.odom_callback) 
+        self.start_wall_time = time.monotonic()
 
     def odom_callback(self, msg):
         pos = msg.pose.pose.position
@@ -75,7 +111,18 @@ class GlobalPlanner:
         self.goal_image_pub.publish(img_msg)
 
     def image_callback(self, msg):
-        if self.current_pose is None: return
+        if self.current_pose is None or self.finished:
+            return
+        if (
+            self.timeout > 0
+            and self.start_wall_time is not None
+            and time.monotonic() - self.start_wall_time >= self.timeout
+        ):
+            rospy.logwarn("导航超时；规划器未声明成功。")
+            self.finished = True
+            self.goal_reached_pub.publish(False)
+            rospy.signal_shutdown("Navigation timeout")
+            return
 
         try:
             img_1d = np.frombuffer(msg.data, dtype=np.uint8)
@@ -103,7 +150,7 @@ class GlobalPlanner:
         for node in temp_path[:4]: 
             search_pool.add(node)
             
-        search_pool = list(search_pool) # 比如 [7, 8, 9, 24, 25]
+        search_pool = sorted(search_pool)
 
         # 从张量中提取这些指定节点的特征和坐标
         window_vectors = self.map_vectors[search_pool]
@@ -123,30 +170,22 @@ class GlobalPlanner:
         # ---------------------------------------------------------
         # 🛑 终点刹车逻辑
         # ---------------------------------------------------------
-        if self.current_node == self.goal_node:
-            rospy.loginfo("🎯 成功抵达最终节点！正在紧急制动...")
-            
-            # 1. 🔪 第一步：立刻切断小脑和肌肉的电源，防止它们继续抢夺方向盘
-            os.system("pkill -9 -f navigate_dynamic.py")
-            os.system("pkill -9 -f pd_controller.py")
-            
-            # 给系统一点点时间彻底回收进程
-            rospy.sleep(0.2) 
-            
-            # 2. 🛑 第二步：此时世界安静了，我们来踩死刹车
-            from geometry_msgs.msg import Twist
-            vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
-            zero_vel = Twist()
-            zero_vel.linear.x = 0.0
-            zero_vel.angular.z = 0.0
-            
-            # 连踩 20 脚刹车，确保底层绝对收到
-            for _ in range(20):
-                vel_pub.publish(zero_vel)
-                rospy.sleep(0.05)
-            
-            rospy.loginfo("🏁 车辆已彻底停稳。完美收工！")
-            rospy.signal_shutdown("Goal Reached")
+        goal_pose = self.map_poses[self.goal_node]
+        goal_distance = torch.norm(goal_pose - current_pose_tensor).item()
+        if self.current_node == self.goal_node and goal_distance <= self.goal_distance:
+            self.goal_confirmation_count += 1
+        else:
+            self.goal_confirmation_count = 0
+
+        if self.goal_confirmation_count >= self.goal_confirmations:
+            rospy.loginfo(
+                "GOAL_REACHED node=%d distance=%.3f confirmations=%d",
+                self.goal_node,
+                goal_distance,
+                self.goal_confirmation_count,
+            )
+            self.finished = True
+            self.goal_reached_pub.publish(True)
             return
 
         # ---------------------------------------------------------
@@ -159,26 +198,26 @@ class GlobalPlanner:
 
         path_length_remaining = len(shortest_path) - 1
         
-        # ---------------------------------------------------------
-        # 🧠 第三步：视距动态回弹 (V-LOS 遮挡检测)
-        # ---------------------------------------------------------
+        # Appearance-continuity lookahead adjustment. DINOv2 similarity is a
+        # heuristic and must not be interpreted as geometric visibility.
         if path_length_remaining > 0:
             # 默认最大看前方 3 步
-            dynamic_lookahead = min(3, path_length_remaining)
+            dynamic_lookahead = min(self.lookahead, path_length_remaining)
             target_node = shortest_path[dynamic_lookahead]
 
-            # 🔴 终极遮挡检测：拿现在的画面，去和预定目标节点的照片比对
             sim_to_target = torch.nn.functional.cosine_similarity(
                 current_feature.unsqueeze(0), self.map_vectors[target_node].unsqueeze(0)
             ).item()
 
-            # 如果 DINOv2 判定相似度跌破 0.85，说明目标在墙后面（视野盲区）！
-            if sim_to_target < 0.85:
-                # 强行把视距拉回眼前（只看下一步的拐角），防止小脑抓瞎
+            if self.enable_vlos and sim_to_target < self.vlos_threshold:
                 target_node = shortest_path[1]
-                rospy.loginfo_throttle(1.0, f"⚠️ 弯道盲区 (Sim: {sim_to_target:.2f})！视距紧急缩短至节点 [{target_node}]")
+                rospy.loginfo_throttle(1.0, f"低外观连续性 (Sim: {sim_to_target:.2f})；缩短至节点 [{target_node}]")
             else:
-                rospy.loginfo_throttle(1.0, f"🛣️ 视野开阔 (Sim: {sim_to_target:.2f})，巡航目标 [{target_node}]")
+                mode = "固定前瞻" if not self.enable_vlos else "外观连续"
+                rospy.loginfo_throttle(
+                    1.0,
+                    f"{mode} (Sim: {sim_to_target:.2f})，目标 [{target_node}]",
+                )
         else:
             target_node = self.goal_node
 
@@ -190,10 +229,31 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", type=str, default="y_graph_map")
     parser.add_argument("--goal", type=int, default=-1)
+    parser.add_argument("--map-root", default=None)
+    parser.add_argument("--goal-distance", type=float, default=0.45)
+    parser.add_argument("--goal-confirmations", type=int, default=3)
+    parser.add_argument("--timeout", type=float, default=0.0)
+    parser.add_argument("--lookahead", type=int, default=3)
+    parser.add_argument("--vlos-threshold", type=float, default=0.85)
+    parser.add_argument(
+        "--disable-vlos",
+        action="store_true",
+        help="Use a fixed lookahead; intended for controlled ablation.",
+    )
     args = parser.parse_args()
 
     try:
-        GlobalPlanner(map_name=args.dir, goal_node=args.goal) 
+        GlobalPlanner(
+            map_name=args.dir,
+            goal_node=args.goal,
+            map_root=args.map_root,
+            goal_distance=args.goal_distance,
+            goal_confirmations=args.goal_confirmations,
+            timeout=args.timeout,
+            lookahead=args.lookahead,
+            vlos_threshold=args.vlos_threshold,
+            enable_vlos=not args.disable_vlos,
+        )
         rospy.spin()
     except rospy.ROSInterruptException:
         pass

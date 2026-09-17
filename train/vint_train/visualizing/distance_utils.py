@@ -1,9 +1,19 @@
 import os
-import wandb
 import numpy as np
 from typing import List, Optional, Tuple
 from vint_train.visualizing.visualize_utils import numpy_to_img
 import matplotlib.pyplot as plt
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+
+def _require_wandb():
+    if wandb is None:
+        raise ImportError("wandb is required for visualization logging with use_wandb=True; install wandb or disable wandb logging.")
+    return wandb
 
 
 def visualize_dist_pred(
@@ -77,9 +87,9 @@ def visualize_dist_pred(
             display,
         )
         if use_wandb:
-            wandb_list.append(wandb.Image(save_path))
+            wandb_list.append(_require_wandb().Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_dist_prediction": wandb_list}, commit=False)
+        _require_wandb().log({f"{eval_type}_dist_prediction": wandb_list}, commit=False)
 
 
 def visualize_dist_pairwise_pred(
@@ -165,9 +175,9 @@ def visualize_dist_pairwise_pred(
             display,
         )
         if use_wandb:
-            wandb_list.append(wandb.Image(save_path))
+            wandb_list.append(_require_wandb().Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_pairwise_classification": wandb_list}, commit=False)
+        _require_wandb().log({f"{eval_type}_pairwise_classification": wandb_list}, commit=False)
 
 
 def display_distance_pred(

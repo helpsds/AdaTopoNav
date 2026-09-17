@@ -40,6 +40,7 @@ context_size = None
 subgoal = []
 obs_img = None
 dynamic_goal_img = None  
+planner_goal_reached = False
 
 # Load the model 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,8 +69,23 @@ def callback_dynamic_goal(msg):
     except Exception as e:
         rospy.logerr_throttle(2, f"解析舰长目标图像失败: {e}")
 
+def callback_planner_goal(msg):
+    global planner_goal_reached
+    # A previous planner process may still have a latched True while a new
+    # trial is starting. A success result is only meaningful after this
+    # navigation node has received a target image for the current trial.
+    if bool(msg.data) and dynamic_goal_img is None:
+        rospy.logwarn("忽略本轮目标图像就绪前收到的旧终点成功信号")
+        return
+    planner_goal_reached = bool(msg.data)
+
 def main(args: argparse.Namespace):
-    global context_size, dynamic_goal_img
+    global context_size, dynamic_goal_img, planner_goal_reached
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     # load model parameters
     with open(MODEL_CONFIG_PATH, "r") as f:
@@ -124,6 +140,8 @@ def main(args: argparse.Namespace):
     # 🔴 新增：挂载监听通道
     target_image_sub = rospy.Subscriber(
         "/topoplan/target_image", Image, callback_dynamic_goal, queue_size=1)
+    planner_goal_sub = rospy.Subscriber(
+        "/topoplan/planner_goal_reached", Bool, callback_planner_goal, queue_size=1)
         
     waypoint_pub = rospy.Publisher(
         WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)  
@@ -145,6 +163,13 @@ def main(args: argparse.Namespace):
 
     # navigation loop
     while not rospy.is_shutdown():
+        if planner_goal_reached:
+            waypoint_msg = Float32MultiArray()
+            waypoint_msg.data = np.zeros(4)
+            waypoint_pub.publish(waypoint_msg)
+            goal_pub.publish(True)
+            rospy.signal_shutdown("Goal reached with metric confirmation")
+            break
         # EXPLORATION MODE
         chosen_waypoint = np.zeros(4)
         
@@ -259,48 +284,18 @@ def main(args: argparse.Namespace):
         # RECOVERY MODE / OUTPUT
         if model_params["normalize"]:
             chosen_waypoint[:2] *= (MAX_V / RATE)  
-            
-# ---------------------------------------------------------
-        # 🦵 杀手锏 2：丝滑运动学耦合 (Continuous Kinematic Coupling)
-        # ---------------------------------------------------------
-        # chosen_waypoint[0] 是前进分量，chosen_waypoint[1] 是转向分量
-        angle_to_goal = math.atan2(chosen_waypoint[1], chosen_waypoint[0])
-        
 
-        # ---------------------------------------------------------
-        # 🚜 终极暴力补丁：坦克式原地掉头 (Tank-style Spin-in-place)
-        # ---------------------------------------------------------
-        angle_to_goal = math.atan2(chosen_waypoint[1], chosen_waypoint[0])
-        
-        # 【核心逻辑】只要目标偏离车头超过 25 度 (约 0.44 弧度)
-        if abs(angle_to_goal) > 0.44:
-            # 1. 彻底切断前进动力，油门归零！
-            chosen_waypoint[0] = 0.0 
-            # 2. 转向马力全开，给一个爆发性的角速度
-            # 加上 np.sign 是为了保持原有的转向方向
-            chosen_waypoint[1] = np.sign(chosen_waypoint[1]) * 0.6 
-            # rospy.loginfo_throttle(1.0, "🚧 角度过大！强制执行原地坦克旋转...")
-        else:
-            # 只有角度对准了，才允许释放线速度
-            speed_factor = max(0.0, math.cos(angle_to_goal))
-            original_v = chosen_waypoint[0]
-            chosen_waypoint[0] = original_v * (speed_factor ** 2)
-            chosen_waypoint[1] *= 1.5 
-            
-        waypoint_msg = Float32MultiArray()
-        waypoint_msg.data = chosen_waypoint
-        waypoint_pub.publish(waypoint_msg)
-        # 魔法公式：用 cos 函数的平方作为速度衰减因子
-        # 当角度为 0 (直行) 时，cos(0)=1，速度 100% 释放
-        # 当角度为 90度 (原地掉头) 时，cos(90)=0，前进速度直接归零，变成纯原地旋转！
-        # speed_factor = max(0.0, math.cos(angle_to_goal))
-        
-        # # 给线速度施加魔法衰减 (平方会让衰减曲线在弯道更陡峭，防止撞墙)
-        # original_v = chosen_waypoint[0]
-        # chosen_waypoint[0] = original_v * (speed_factor ** 2)
-        
-        # # 为了保证不失去动力，适当放大角速度分量，让它转得更果断
-        # chosen_waypoint[1] *= 1.5 
+        if not args.disable_waypoint_modulation:
+            angle_to_goal = math.atan2(chosen_waypoint[1], chosen_waypoint[0])
+            if abs(angle_to_goal) > args.heading_threshold:
+                chosen_waypoint[0] = 0.0
+                chosen_waypoint[1] = (
+                    np.sign(chosen_waypoint[1]) * args.turn_waypoint
+                )
+            else:
+                speed_factor = max(0.0, math.cos(angle_to_goal))
+                chosen_waypoint[0] *= speed_factor ** 2
+                chosen_waypoint[1] *= args.lateral_gain
             
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = chosen_waypoint
@@ -384,6 +379,20 @@ if __name__ == "__main__":
         type=int,
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
+    parser.add_argument(
+        "--seed",
+        default=0,
+        type=int,
+        help="random seed used for diffusion action sampling",
+    )
+    parser.add_argument(
+        "--disable-waypoint-modulation",
+        action="store_true",
+        help="Publish the raw model waypoint; intended for controlled ablation.",
+    )
+    parser.add_argument("--heading-threshold", type=float, default=0.44)
+    parser.add_argument("--turn-waypoint", type=float, default=0.6)
+    parser.add_argument("--lateral-gain", type=float, default=1.5)
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)

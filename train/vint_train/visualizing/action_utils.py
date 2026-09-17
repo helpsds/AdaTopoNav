@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2
 from typing import Optional, List
-import wandb
 import yaml
 import torch
 import torch.nn as nn
@@ -18,6 +17,18 @@ from vint_train.visualizing.visualize_utils import (
     YELLOW,
     MAGENTA,
 )
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+
+def _require_wandb():
+    if wandb is None:
+        raise ImportError("wandb is required for visualization logging with use_wandb=True; install wandb or disable wandb logging.")
+    return wandb
+
 
 # load data_config.yaml
 with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "r") as f:
@@ -107,9 +118,9 @@ def visualize_traj_pred(
             display,
         )
         if use_wandb:
-            wandb_list.append(wandb.Image(save_path))
+            wandb_list.append(_require_wandb().Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
+        _require_wandb().log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
 
 
 def compare_waypoints_pred_to_label(

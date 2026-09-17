@@ -1,204 +1,222 @@
+"""Goal-masked NoMaD exploration with the shared DA3 safety shield."""
 
-import matplotlib.pyplot as plt
-import os
-from typing import Tuple, Sequence, Dict, Union, Optional, Callable
-import numpy as np
-import torch
-import torch.nn as nn
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from __future__ import annotations
 
-import matplotlib.pyplot as plt
-import yaml
-
-# ROS
-import rospy
-from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32MultiArray
-from utils import msg_to_pil, to_numpy, transform_images, load_model
-
-from vint_train.training.train_utils import get_action
-import torch
-from PIL import Image as PILImage
-import numpy as np
 import argparse
-import yaml
 import time
+from pathlib import Path
+
+import numpy as np
+import rospy
+import torch
+import yaml
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from PIL import Image as PILImage
+from sensor_msgs.msg import Image
+from std_msgs.msg import Float32MultiArray
+from visualization_msgs.msg import MarkerArray
+
+from deployment_bootstrap import VISUALNAV_ROOT
+from nomad_inference import sample_nomad_actions
+from remote_safety_client import RemoteSafetyRuntime
+from safety_runtime import SafetyRuntime, add_safety_arguments
+from topic_names import (
+    IMAGE_TOPIC,
+    NOMAD_TRAJECTORIES_TOPIC,
+    SAMPLED_ACTIONS_TOPIC,
+    SELECTED_TRAJECTORY_TOPIC,
+    WAYPOINT_TOPIC,
+)
+from trajectory_candidates import build_candidate_batch, selected_controller_waypoint
+from trajectory_visualization import make_trajectory_marker_arrays
+from utils import load_model, msg_to_pil, transform_images
 
 
-# UTILS
-from topic_names import (IMAGE_TOPIC,
-                        WAYPOINT_TOPIC,
-                        SAMPLED_ACTIONS_TOPIC)
+DEPLOYMENT_ROOT = Path(__file__).resolve().parents[1]
+ROBOT_CONFIG_PATH = DEPLOYMENT_ROOT / "config/robot.yaml"
+MODEL_CONFIG_PATH = DEPLOYMENT_ROOT / "config/models.yaml"
+with open(ROBOT_CONFIG_PATH, "r", encoding="utf-8") as handle:
+    robot_config = yaml.safe_load(handle)
+MAX_V = float(robot_config["max_v"])
+MAX_W = float(robot_config["max_w"])
+RATE = float(robot_config["frame_rate"])
 
-
-# CONSTANTS
-MODEL_WEIGHTS_PATH = "../model_weights"
-ROBOT_CONFIG_PATH ="../config/robot.yaml"
-MODEL_CONFIG_PATH = "../config/models.yaml"
-with open(ROBOT_CONFIG_PATH, "r") as f:
-    robot_config = yaml.safe_load(f)
-MAX_V = robot_config["max_v"]
-MAX_W = robot_config["max_w"]
-RATE = robot_config["frame_rate"] 
-
-# GLOBALS
-context_queue = []
-context_size = None  
-
-# Load the model 
+context_queue: list[PILImage.Image] = []
+context_size: int | None = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-def callback_obs(msg):
+
+def callback_obs(msg: Image) -> None:
     obs_img = msg_to_pil(msg)
-    if context_size is not None:
-        if len(context_queue) < context_size + 1:
-            context_queue.append(obs_img)
-        else:
-            context_queue.pop(0)
-            context_queue.append(obs_img)
+    if context_size is None:
+        return
+    if len(context_queue) < context_size + 1:
+        context_queue.append(obs_img)
+    else:
+        context_queue.pop(0)
+        context_queue.append(obs_img)
 
 
-def main(args: argparse.Namespace):
+def main(args: argparse.Namespace) -> None:
     global context_size
 
-    # load model parameters
-    with open(MODEL_CONFIG_PATH, "r") as f:
-        model_paths = yaml.safe_load(f)
-
-    model_config_path = model_paths[args.model]["config_path"]
-    with open(model_config_path, "r") as f:
-        model_params = yaml.safe_load(f)
-
-    context_size = model_params["context_size"]
-
-    # load model weights
-    ckpth_path = model_paths[args.model]["ckpt_path"]
-    if os.path.exists(ckpth_path):
-        print(f"Loading model from {ckpth_path}")
-    else:
-        raise FileNotFoundError(f"Model weights not found at {ckpth_path}")
-    model = load_model(
-        ckpth_path,
-        model_params,
-        device,
-    )
-    model = model.to(device)
-    model.eval()
-
-    num_diffusion_iters = model_params["num_diffusion_iters"]
+    with open(MODEL_CONFIG_PATH, "r", encoding="utf-8") as handle:
+        model_paths = yaml.safe_load(handle)
+    configured_model_config = Path(model_paths[args.model]["config_path"])
+    copied_config = (Path(__file__).resolve().parent / configured_model_config).resolve()
+    model_config_path = Path(args.nomad_config).expanduser().resolve() if args.nomad_config else copied_config
+    if not model_config_path.exists() and args.model == "nomad":
+        model_config_path = VISUALNAV_ROOT / "train/config/nomad.yaml"
+    with model_config_path.open("r", encoding="utf-8") as handle:
+        model_params = yaml.safe_load(handle)
+    if model_params["model_type"] != "nomad":
+        raise ValueError("this safety deployment explore.py supports model_type=nomad only")
+    context_size = int(model_params["context_size"])
+    configured_checkpoint = Path(model_paths[args.model]["ckpt_path"])
+    copied_checkpoint = (Path(__file__).resolve().parent / configured_checkpoint).resolve()
+    checkpoint_path = Path(args.nomad_checkpoint).expanduser().resolve() if args.nomad_checkpoint else copied_checkpoint
+    if not checkpoint_path.exists() and args.model == "nomad":
+        checkpoint_path = VISUALNAV_ROOT / "deployment/model_weights/nomad.pth"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Model weights not found at {checkpoint_path}")
+    print(f"Loading NoMaD from {checkpoint_path}")
+    model = load_model(checkpoint_path, model_params, device).to(device).eval()
+    num_diffusion_iters = int(model_params["num_diffusion_iters"])
     noise_scheduler = DDPMScheduler(
-        num_train_timesteps=model_params["num_diffusion_iters"],
-        beta_schedule='squaredcos_cap_v2',
+        num_train_timesteps=num_diffusion_iters,
+        beta_schedule="squaredcos_cap_v2",
         clip_sample=True,
-        prediction_type='epsilon'
+        prediction_type="epsilon",
     )
+    safety = RemoteSafetyRuntime(args) if args.safety_server else SafetyRuntime(args, device)
 
-    # ROS
     rospy.init_node("EXPLORATION", anonymous=False)
     rate = rospy.Rate(RATE)
-    image_curr_msg = rospy.Subscriber(
-        IMAGE_TOPIC, Image, callback_obs, queue_size=1)
-    waypoint_pub = rospy.Publisher(
-        WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)  
+    rospy.Subscriber(IMAGE_TOPIC, Image, callback_obs, queue_size=1)
+    waypoint_pub = rospy.Publisher(WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)
     sampled_actions_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
-
-    print("Registered with master node. Waiting for image observations...")
+    trajectories_pub = rospy.Publisher(NOMAD_TRAJECTORIES_TOPIC, MarkerArray, queue_size=1)
+    selected_pub = rospy.Publisher(SELECTED_TRAJECTORY_TOPIC, MarkerArray, queue_size=1)
+    print("Registered with ROS master. Waiting for image observations...")
 
     while not rospy.is_shutdown():
-        # EXPLORATION MODE
-        waypoint_msg = Float32MultiArray()
-        if (
-                len(context_queue) > model_params["context_size"]
-            ):
+        if len(context_queue) > context_size:
+            obs_images = transform_images(
+                context_queue, model_params["image_size"], center_crop=False
+            ).to(device)
+            fake_goal = torch.randn((1, 3, *model_params["image_size"]), device=device)
+            mask = torch.ones(1, dtype=torch.long, device=device)
+            with torch.inference_mode():
+                obs_cond = model(
+                    "vision_encoder",
+                    obs_img=obs_images,
+                    goal_img=fake_goal,
+                    input_goal_mask=mask,
+                )
+            started = time.time()
+            nomad_actions = sample_nomad_actions(
+                model,
+                obs_cond,
+                noise_scheduler,
+                num_diffusion_iters,
+                args.num_samples,
+                int(model_params["len_traj_pred"]),
+            )
+            selected_idx = 0
+            selected_actions = nomad_actions
+            selected_metadata = build_candidate_batch(
+                nomad_actions,
+                num_waypoints=args.student_num_waypoints,
+                append_manual=False,
+                platform_config=args.platform_config,
+            ).metadata
+            prediction = None
+            result = None
 
-            obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
-            obs_images = obs_images.to(device)
-            fake_goal = torch.randn((1, 3, *model_params["image_size"])).to(device)
-            mask = torch.ones(1).long().to(device) # ignore the goal
-
-            # infer action
-            with torch.no_grad():
-                # encoder vision features
-                obs_cond = model('vision_encoder', obs_img=obs_images, goal_img=fake_goal, input_goal_mask=mask)
-                
-                # (B, obs_horizon * obs_dim)
-                if len(obs_cond.shape) == 2:
-                    obs_cond = obs_cond.repeat(args.num_samples, 1)
-                else:
-                    obs_cond = obs_cond.repeat(args.num_samples, 1, 1)
-                
-                # initialize action from Gaussian noise
-                noisy_action = torch.randn(
-                    (args.num_samples, model_params["len_traj_pred"], 2), device=device)
-                naction = noisy_action
-
-                # init scheduler
-                noise_scheduler.set_timesteps(num_diffusion_iters)
-
-                start_time = time.time()
-                for k in noise_scheduler.timesteps[:]:
-                    # predict noise
-                    noise_pred = model(
-                        'noise_pred_net',
-                        sample=naction,
-                        timestep=k,
-                        global_cond=obs_cond
+            if safety.enabled:
+                try:
+                    step = safety.step(
+                        context_queue,
+                        nomad_actions,
+                        max_v_mps=MAX_V,
+                        frame_rate_hz=RATE,
+                        normalize_controller_waypoint=bool(model_params["normalize"]),
                     )
+                    selected_actions = step.candidates.actions
+                    selected_metadata = step.candidates.metadata
+                    selected_idx = step.result.selected_index
+                    prediction = step.prediction
+                    result = step.result
+                    chosen_waypoint = safety.controller_waypoint(
+                        step,
+                        args.waypoint,
+                        bool(model_params["normalize"]),
+                        MAX_V,
+                        RATE,
+                    )
+                    safety.log(step, inference_seconds=float(time.time() - started), node="explore")
+                    print(
+                        f"mode={result.mode.value} "
+                        f"idx0={result.idx0_raw_risk:.3f}/{result.idx0_filtered_risk:.3f} "
+                        f"selected={selected_idx} reason={result.reason}"
+                    )
+                except Exception as error:
+                    safety.fail_closed()
+                    failure = safety.failure_candidates(nomad_actions)
+                    selected_actions = failure.actions
+                    selected_metadata = failure.metadata
+                    selected_idx = -1
+                    chosen_waypoint = np.zeros((2,), dtype=np.float32)
+                    safety.log_error(error, node="explore")
+                    rospy.logerr(f"Safety inference failed closed: {type(error).__name__}: {error}")
+            else:
+                chosen_waypoint = selected_controller_waypoint(
+                    nomad_actions[0],
+                    args.waypoint,
+                    bool(model_params["normalize"]),
+                    MAX_V,
+                    RATE,
+                )
 
-                    # inverse diffusion step (remove noise)
-                    naction = noise_scheduler.step(
-                        model_output=noise_pred,
-                        timestep=k,
-                        sample=naction
-                    ).prev_sample
-                print("time elapsed:", time.time() - start_time)
+            sampled = Float32MultiArray()
+            sampled.data = np.concatenate(
+                [np.asarray([selected_idx], dtype=np.float32), selected_actions.reshape(-1)]
+            )
+            sampled_actions_pub.publish(sampled)
+            if not args.disable_trajectory_viz:
+                all_markers, selected_markers = make_trajectory_marker_arrays(
+                    selected_actions,
+                    selected_metadata,
+                    selected_idx,
+                    args.waypoint,
+                    args.trajectory_viz_frame,
+                    prediction=prediction,
+                    result=result,
+                    nomad_safe_threshold=args.nomad_safe_threshold,
+                    manual_safe_threshold=args.manual_safe_threshold,
+                )
+                trajectories_pub.publish(all_markers)
+                selected_pub.publish(selected_markers)
 
-            naction = to_numpy(get_action(naction))
-            
-            sampled_actions_msg = Float32MultiArray()
-            sampled_actions_msg.data = np.concatenate((np.array([0]), naction.flatten()))
-            sampled_actions_pub.publish(sampled_actions_msg)
-
-            naction = naction[0] # change this based on heuristic
-
-            chosen_waypoint = naction[args.waypoint]
-
-            if model_params["normalize"]:
-                chosen_waypoint *= (MAX_V / RATE)
-            waypoint_msg.data = chosen_waypoint
-            waypoint_pub.publish(waypoint_msg)
-            print("Published waypoint")
+            waypoint = Float32MultiArray()
+            waypoint.data = np.asarray(chosen_waypoint, dtype=np.float32)
+            waypoint_pub.publish(waypoint)
         rate.sleep()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="NoMaD exploration with DA3 safety")
+    parser.add_argument("--model", "-m", default="nomad")
+    parser.add_argument("--waypoint", "-w", type=int, default=2)
+    parser.add_argument("--num-samples", "-n", type=int, default=16)
+    parser.add_argument("--nomad-config", default=None, help="Override NoMaD model YAML.")
+    parser.add_argument("--nomad-checkpoint", default=None, help="Override NoMaD .pth checkpoint.")
+    add_safety_arguments(parser)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Code to run GNM DIFFUSION EXPLORATION on the locobot")
-    parser.add_argument(
-        "--model",
-        "-m",
-        default="nomad",
-        type=str,
-        help="model name (hint: check ../config/models.yaml) (default: nomad)",
-    )
-    parser.add_argument(
-        "--waypoint",
-        "-w",
-        default=2, # close waypoints exihibit straight line motion (the middle waypoint is a good default)
-        type=int,
-        help=f"""index of the waypoint used for navigation (between 0 and 4 or 
-        how many waypoints your model predicts) (default: 2)""",
-    )
-    parser.add_argument(
-        "--num-samples",
-        "-n",
-        default=8,
-        type=int,
-        help=f"Number of actions sampled from the exploration model (default: 8)",
-    )
-    args = parser.parse_args()
+    arguments = parse_args()
     print(f"Using {device}")
-    main(args)
-
-
+    main(arguments)

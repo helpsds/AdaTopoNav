@@ -1,3 +1,5 @@
+import argparse
+import time
 import numpy as np
 import yaml
 from typing import Tuple
@@ -31,6 +33,10 @@ waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
 reached_goal = False
 reverse_mode = False
 current_yaw = None
+collision_active = False
+recovery_started_at = None
+last_recovery_end = float("-inf")
+recovery_turn_direction = 1.0
 
 def clip_angle(theta) -> float:
 	"""Clip angle to [-pi, pi]"""
@@ -40,8 +46,12 @@ def clip_angle(theta) -> float:
 	return theta - 2 * np.pi
       
 
-def pd_controller(waypoint: np.ndarray) -> Tuple[float]:
-	"""PD controller for the robot"""
+def waypoint_controller(waypoint: np.ndarray) -> Tuple[float, float]:
+	"""Convert a local waypoint to clipped linear and angular velocities.
+
+	This is a kinematic proportional mapping, not a PD controller: no
+	derivative of tracking error is estimated.
+	"""
 	assert len(waypoint) == 2 or len(waypoint) == 4, "waypoint must be a 2D or 4D vector"
 	if len(waypoint) == 2:
 		dx, dy = waypoint
@@ -75,11 +85,41 @@ def callback_reached_goal(reached_goal_msg: Bool):
 	reached_goal = reached_goal_msg.data
 
 
-def main():
-	global vel_msg, reverse_mode
+def callback_collision(collision_msg: Bool):
+	"""Start one recovery maneuver on each False-to-True contact edge."""
+	global collision_active, recovery_started_at
+	global last_recovery_end, recovery_turn_direction
+
+	active = bool(collision_msg.data)
+	if not active:
+		collision_active = False
+		return
+	if collision_active:
+		return
+	collision_active = True
+
+	now = time.monotonic()
+	if recovery_started_at is not None:
+		return
+	if now - last_recovery_end < main.args.recovery_cooldown:
+		return
+	recovery_turn_direction *= -1.0
+	recovery_started_at = now
+	rospy.logwarn(
+		"COLLISION_RECOVERY start: reverse %.2fs, turn %.2fs",
+		main.args.recovery_reverse_seconds,
+		main.args.recovery_turn_seconds,
+	)
+
+
+def main(args):
+	global vel_msg, reverse_mode, recovery_started_at, last_recovery_end
+	main.args = args
 	rospy.init_node("PD_CONTROLLER", anonymous=False)
 	waypoint_sub = rospy.Subscriber(WAYPOINT_TOPIC, Float32MultiArray, callback_drive, queue_size=1)
 	reached_goal_sub = rospy.Subscriber(REACHED_GOAL_TOPIC, Bool, callback_reached_goal, queue_size=1)
+	if args.collision_topic:
+		rospy.Subscriber(args.collision_topic, Bool, callback_collision, queue_size=10)
 	vel_out = rospy.Publisher(VEL_TOPIC, Twist, queue_size=1)
 	rate = rospy.Rate(RATE)
 	print("Registered with master node. Waiting for waypoints...")
@@ -89,8 +129,23 @@ def main():
 			vel_out.publish(vel_msg)
 			print("Reached goal! Stopping...")
 			return
+		elif recovery_started_at is not None:
+			elapsed = time.monotonic() - recovery_started_at
+			if elapsed < args.recovery_reverse_seconds:
+				vel_msg.linear.x = -abs(args.recovery_linear_speed)
+				vel_msg.angular.z = 0.0
+			elif elapsed < args.recovery_reverse_seconds + args.recovery_turn_seconds:
+				vel_msg.linear.x = 0.0
+				vel_msg.angular.z = (
+					recovery_turn_direction * abs(args.recovery_angular_speed)
+				)
+			else:
+				recovery_started_at = None
+				last_recovery_end = time.monotonic()
+				rospy.loginfo("COLLISION_RECOVERY complete; resuming waypoint tracking")
+			vel_out.publish(vel_msg)
 		elif waypoint.is_valid(verbose=True):
-			v, w = pd_controller(waypoint.get())
+			v, w = waypoint_controller(waypoint.get())
 			if reverse_mode:
 				v *= -1
 			vel_msg.linear.x = v
@@ -101,4 +156,15 @@ def main():
 	
 
 if __name__ == '__main__':
-	main()
+	parser = argparse.ArgumentParser(
+		description="Waypoint controller with optional collision recovery"
+	)
+	parser.add_argument(
+		"--collision-topic", default="/scout/has_obstacle_contact"
+	)
+	parser.add_argument("--recovery-reverse-seconds", type=float, default=0.8)
+	parser.add_argument("--recovery-turn-seconds", type=float, default=1.2)
+	parser.add_argument("--recovery-linear-speed", type=float, default=0.12)
+	parser.add_argument("--recovery-angular-speed", type=float, default=0.35)
+	parser.add_argument("--recovery-cooldown", type=float, default=1.0)
+	main(parser.parse_args(rospy.myargv()[1:]))

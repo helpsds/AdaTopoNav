@@ -6,9 +6,21 @@ frame_rate: 4 # Hz
 graph_rate: 0.3333 # Hz  
 
 # topic names (modify for different robots/nodes)
-vel_teleop_topic: /cmd_vel_mux/input/teleop 
-# vel_navi_topic: /cmd_vel_mux/input/navi
-vel_navi_topic: "/cmd_vel"
+vel_teleop_topic: /cmd_vel
+vel_navi_topic: /cmd_vel
 vel_recovery_topic: /cmd_vel_mux/input/recovery
 
+# Shared camera/control topics used by CARE bridge and custom deployments.
+image_topic: /camera/color/image_raw
+waypoint_topic: /waypoint
+sampled_actions_topic: /sampled_actions
+trajectory_viz_topic: /care/trajectory_viz
 
+# CARE UniDepth settings. These paths are resolved from the repository root
+# unless absolute paths are provided.
+intrinsics_path: intrinsic/custom/intrinsics.npy
+image_width: 640
+image_height: 480
+safety_margin: 0.1
+proximity_threshold: 1.0
+unidepth_model_path: weights/unidepth-v2-vits14

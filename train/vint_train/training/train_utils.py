@@ -1,4 +1,3 @@
-import wandb
 import os
 import numpy as np
 import yaml
@@ -23,6 +22,18 @@ from torch.optim import Adam
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+
+def _require_wandb():
+    if wandb is None:
+        raise ImportError("wandb is required for training/logging with use_wandb=True; install wandb or disable wandb logging.")
+    return wandb
+
 
 # LOAD DATA CONFIG
 with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "r") as f:
@@ -133,7 +144,7 @@ def _log_data(
                 print(f"(epoch {epoch}) {logger.full_name()} {logger.average()}")
 
     if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-        wandb.log(data_log, commit=wandb_increment_step)
+        _require_wandb().log(data_log, commit=wandb_increment_step)
 
     if image_log_freq != 0 and i % image_log_freq == 0:
         visualize_dist_pred(
@@ -666,9 +677,9 @@ def train_nomad(
             # Logging
             loss_cpu = loss.item()
             tepoch.set_postfix(loss=loss_cpu)
-            wandb.log({"total_loss": loss_cpu})
-            wandb.log({"dist_loss": dist_loss.item()})
-            wandb.log({"diffusion_loss": diffusion_loss.item()})
+            _require_wandb().log({"total_loss": loss_cpu})
+            _require_wandb().log({"dist_loss": dist_loss.item()})
+            _require_wandb().log({"diffusion_loss": diffusion_loss.item()})
 
 
             if i % print_log_freq == 0:
@@ -695,7 +706,7 @@ def train_nomad(
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb.log(data_log, commit=True)
+                    _require_wandb().log(data_log, commit=True)
 
             if image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_diffusion_action_distribution(
@@ -870,9 +881,9 @@ def evaluate_nomad(
             loss_cpu = rand_mask_loss.item()
             tepoch.set_postfix(loss=loss_cpu)
 
-            wandb.log({"diffusion_eval_loss (random masking)": rand_mask_loss})
-            wandb.log({"diffusion_eval_loss (no masking)": no_mask_loss})
-            wandb.log({"diffusion_eval_loss (goal masking)": goal_mask_loss})
+            _require_wandb().log({"diffusion_eval_loss (random masking)": rand_mask_loss})
+            _require_wandb().log({"diffusion_eval_loss (no masking)": no_mask_loss})
+            _require_wandb().log({"diffusion_eval_loss (goal masking)": goal_mask_loss})
 
             if i % print_log_freq == 0 and print_log_freq != 0:
                 losses = _compute_losses_nomad(
@@ -898,7 +909,7 @@ def evaluate_nomad(
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb.log(data_log, commit=True)
+                    _require_wandb().log(data_log, commit=True)
 
             if image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_diffusion_action_distribution(
@@ -1169,9 +1180,8 @@ def visualize_diffusion_action_distribution(
 
         save_path = os.path.join(visualize_path, f"sample_{i}.png")
         plt.savefig(save_path)
-        wandb_list.append(wandb.Image(save_path))
+        wandb_list.append(_require_wandb().Image(save_path))
         plt.close(fig)
     if len(wandb_list) > 0 and use_wandb:
-        wandb.log({f"{eval_type}_action_samples": wandb_list}, commit=False)
-
+        _require_wandb().log({f"{eval_type}_action_samples": wandb_list}, commit=False)
 

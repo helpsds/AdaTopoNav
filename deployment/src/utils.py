@@ -95,8 +95,16 @@ def load_model(
     else:
         raise ValueError(f"Invalid model type: {model_type}")
     
-# 显式允许加载自定义类
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)    
+    # GNM/ViNT checkpoints contain a serialized model object, not only tensor
+    # weights. PyTorch 2.6 changed torch.load's default to weights_only=True,
+    # so explicitly use the legacy mode for these trusted local checkpoints.
+    try:
+        checkpoint = torch.load(
+            model_path, map_location=device, weights_only=False
+        )
+    except TypeError:
+        # Compatibility with PyTorch releases that predate weights_only.
+        checkpoint = torch.load(model_path, map_location=device)
     if model_type == "nomad":
         state_dict = checkpoint
         model.load_state_dict(state_dict, strict=False)

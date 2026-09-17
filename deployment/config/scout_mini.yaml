@@ -1,0 +1,61 @@
+# Physical platform configuration shared by trajectory generation, labeling,
+# training, and deployment. Camera calibration is dataset-specific and must be
+# loaded from each dataset's camera_info file.
+
+name: scout_mini
+manufacturer: agilex
+
+vehicle:
+  drive_type: four_wheel_differential
+  independent_suspension: true
+  can_turn_in_place: true
+  wheelbase_m: 0.451
+  track_width_m: 0.490
+  body_length_m: 0.612
+  body_width_m: 0.580
+  max_speed_mps: 1.5
+
+  # Use the measured body rectangle for collision labels. Additional safety
+  # margin is an experiment parameter and is not hidden in the body size.
+  footprint:
+    shape: rectangle
+    length_m: 0.612
+    width_m: 0.580
+    safety_margin_m: 0.0
+
+safety_label:
+  collision_target: swept_body_footprint_intersects_obstacle
+  clearance_target: minimum_body_footprint_to_obstacle_distance_m
+  obstacle_dilation_m: 0.03
+  max_eval_path_length_m: 2.5
+  trajectory_station_count: 24
+  footprint_longitudinal_samples: 7
+  footprint_lateral_samples: 7
+  unknown_is_collision: false
+
+# Sixteen deterministic fallback candidates. These are deliberately
+# independent of NoMaD so they remain useful when diffusion samples collapse.
+manual_candidates:
+  num_future_waypoints: 5
+  max_path_length_m: 2.5
+
+  # 2 sides x 2 offsets x 2 transition lengths = 8. The curve ends parallel
+  # to the original heading while retaining its lateral displacement.
+  lateral_shift:
+    enabled: true
+    sides: [left, right]
+    lateral_offsets_m: [0.45, 0.65]
+    transition_lengths_m: [1.4, 2.0]
+    curve: quintic_smoothstep
+
+  # 2 sides x 4 heading changes = 8. Turn smoothly, cap the heading change,
+  # then continue on the tangent instead of rotating continuously.
+  turn_then_tangent:
+    enabled: true
+    sides: [left, right]
+    heading_changes_deg: [15.0, 25.0, 35.0, 45.0]
+    transition_length_m: 1.2
+    curve: constant_curvature_then_tangent
+
+  include_short_straight: false
+  include_in_place_rotation: false

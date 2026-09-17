@@ -3,8 +3,8 @@
 # image obs topics
 FRONT_IMAGE_TOPIC = "/usb_cam_front/image_raw"
 REVERSE_IMAGE_TOPIC = "/usb_cam_reverse/image_raw"
-# IMAGE_TOPIC = "/usb_cam/image_raw"
 IMAGE_TOPIC = "/camera/color/image_raw"
+
 # exploration topics
 SUBGOALS_TOPIC = "/subgoals"
 GRAPH_NAME_TOPIC = "/graph_name"
@@ -27,6 +27,8 @@ VIZ_NAV_IMAGE_TOPIC = "/nav_image"
 
 # visualization topics
 CHOSEN_SUBGOAL_TOPIC = "/chosen_subgoal"
+NOMAD_TRAJECTORIES_TOPIC = "/nomad_candidate_trajectories"
+SELECTED_TRAJECTORY_TOPIC = "/selected_trajectory"
 
 # recorded ont the robot
 ODOM_TOPIC = "/odom"

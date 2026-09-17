@@ -20,17 +20,20 @@ tmux send-keys "echo '👉 请确保 Gazebo 仿真已经单独启动，且小车
 
 # 窗格 1：运行 navigate.py 大脑（补充了你的深度学习环境）
 tmux select-pane -t 1
+tmux send-keys "ros_sim" Enter
 tmux send-keys "conda activate nomad_blackwell" Enter
 tmux send-keys "python navigate.py $*" Enter
 
 # 窗格 2：运行键盘控制（替换掉物理摇杆，方便你随时接管小车）
 tmux select-pane -t 2
 tmux send-keys "conda deactivate" Enter
+tmux send-keys "ros_sim" Enter
 tmux send-keys "source /opt/ros/noetic/setup.bash" Enter
 tmux send-keys "rosrun teleop_twist_keyboard teleop_twist_keyboard.py" Enter
 
 # 窗格 3：运行 pd_controller.py 神经（控制底盘运动）
 tmux select-pane -t 3
+tmux send-keys "ros_sim" Enter
 tmux send-keys "conda activate nomad_blackwell" Enter
 tmux send-keys "python pd_controller.py" Enter
 
