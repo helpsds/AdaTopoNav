@@ -14,6 +14,17 @@ The paper's simulation scenes are shown below: (a) the Y-shaped multi-branch env
 
 ![Y-shaped and L-shaped Gazebo simulation environments](docs/figures/simulation_environments.png)
 
+### L-shaped navigation videos
+
+Click a thumbnail to watch the corresponding real Gazebo camera recording. These are **one trial per method**, not the paper's 20-trial aggregate. Both used the same pretrained GNM backbone and L-shaped scene; Original GNM used the `L_GNM` image map, while AdaTopoNav used the `L_ours` adaptive graph.
+
+| Method | Video | Result of this recorded trial |
+| --- | --- | --- |
+| Original GNM | [![Watch Original GNM L-shaped navigation](docs/videos/gnm_l_preview.jpg)](docs/videos/gnm_l_demo.mp4) | Timeout at 300 s; final goal distance 20.185 m. |
+| AdaTopoNav (M+V+C) | [![Watch AdaTopoNav L-shaped navigation](docs/videos/adatoponav_l_preview.jpg)](docs/videos/adatoponav_l_demo.mp4) | Success at 235.125 s; 0 collisions; final goal distance 1.621 m. |
+
+The overlays show wall-clock trial time and odometry. Recording samples the camera at up to 5 fps, so video playback duration can be shorter than the elapsed trial time when Gazebo delivers fewer frames.
+
 ## 1. Prerequisites and environment
 
 Use Ubuntu 20.04 with ROS Noetic, Gazebo Classic, Conda, and a working Scout Mini Gazebo workspace containing the ROS package `scout_gazebo_sim`. The commands below assume that workspace is at `$HOME/scout_ws`; set `SCOUT_WS` to another path if needed. The optional city-world examples also require a separate Gazebo world/model collection. A GPU is recommended for GNM and DINOv2; the first DINOv2 run may download weights through `torch.hub`.
@@ -168,6 +179,8 @@ TRIALS=20 TIMEOUT_SECONDS=240 \
   GNM_MAP=L_GNM ADA_MAP=L_ours \
   bash run_navigation_experiments.sh
 ```
+
+To record individual trial videos with the same runner, set `RECORD_VIDEOS_DIR` to an output directory and select the desired methods, for example `TRIALS=1 METHODS_CSV=original,ada_mvc RECORD_VIDEOS_DIR="$REPO/docs/videos" bash run_navigation_experiments.sh`. The recorder requires OpenCV (`cv2`) in the inference environment. Its raw output uses `mp4v`; the two linked demos were converted to browser-compatible H.264 with `ffmpeg -i INPUT.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart OUTPUT.mp4`.
 
 `run_y_city_experiments.sh` is the Y-city wrapper: it requires the separately installed `city_osm_roundabout_combined.world` and `bookshelf_large` model and uses the `Y_gnm` / `Y_ours` maps. These experiment scripts include local absolute path defaults for the author's Scout/Conda/world installations; override the documented variables at the top of each script for another machine. Do **not** treat the hard-coded start/goal poses as valid for an arbitrary map.
 

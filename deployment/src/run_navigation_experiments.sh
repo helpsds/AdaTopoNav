@@ -79,6 +79,8 @@ IFS=',' read -r -a METHODS <<< "${METHODS_CSV}"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 RESULT_DIR="${RESULT_DIR:-${SCRIPT_DIR}/experiment_results/${RUN_STAMP}}"
+RECORD_VIDEOS_DIR="${RECORD_VIDEOS_DIR:-}"
+RECORD_VIDEO_FPS="${RECORD_VIDEO_FPS:-5}"
 RAW_CSV="${RESULT_DIR}/trials.csv"
 SUMMARY_CSV="${RESULT_DIR}/summary.csv"
 MAP_CSV="${RESULT_DIR}/map_metrics.csv"
@@ -462,6 +464,19 @@ run_one_trial() {
     log "${label}: evaluator started (pid=${evaluator_pid})."
     sleep 0.5
 
+    local video_pid=""
+    if [[ -n "${RECORD_VIDEOS_DIR}" ]]; then
+        local video_file="${RECORD_VIDEOS_DIR}/${label}_seed${seed}_${ENVIRONMENT}.mp4"
+        start_process "${prefix}_video.log" \
+            "${PYTHON_BIN}" "${SCRIPT_DIR}/record_navigation_video.py" \
+            --output "${video_file}" --label "${label}" \
+            --scene-label "${ENVIRONMENT}" \
+            --fps "${RECORD_VIDEO_FPS}" --odom-topic "${ODOM_TOPIC}" >/dev/null
+        video_pid="${LAST_PID}"
+        log "${label}: recording camera video to ${video_file}."
+        sleep 1
+    fi
+
     start_process "${prefix}_controller.log" \
         "${PYTHON_BIN}" "${SCRIPT_DIR}/pd_controller.py" \
         --collision-topic "${COLLISION_TOPIC}" \
@@ -479,6 +494,9 @@ run_one_trial() {
     # navigation processes are shutting down.
     stop_pid_group "${controller_pid}"
     publish_zero_velocity
+    if [[ -n "${video_pid}" ]]; then
+        stop_pid_group "${video_pid}"
+    fi
     stop_trial_processes
     publish_zero_velocity
     log "END seed=${seed}/${TRIALS} method=${label}"
