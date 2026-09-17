@@ -16,14 +16,14 @@ The paper's simulation scenes are shown below: (a) the Y-shaped multi-branch env
 
 ### L-shaped navigation videos
 
-Click a thumbnail to watch the corresponding real Gazebo camera recording. These are **one trial per method**, not the paper's 20-trial aggregate. Both used the same pretrained GNM backbone and L-shaped scene; Original GNM used the `L_GNM` image map, while AdaTopoNav used the `L_ours` adaptive graph.
+The animated previews play directly in this README. Click either preview to play the full H.264 recording online; the links use a static CDN because GitHub's repository-file page does not reliably provide a video player for committed MP4 files. These are **one trial per method**, not the paper's 20-trial aggregate. Both used the same pretrained GNM backbone and L-shaped scene; Original GNM used the `L_GNM` image map, while AdaTopoNav used the `L_ours` adaptive graph.
 
 | Method | Video | Result of this recorded trial |
 | --- | --- | --- |
-| Original GNM | [![Watch Original GNM L-shaped navigation](docs/videos/gnm_l_preview.jpg)](docs/videos/gnm_l_demo.mp4) | Timeout at 300 s; final goal distance 20.185 m. |
-| AdaTopoNav (M+V+C) | [![Watch AdaTopoNav L-shaped navigation](docs/videos/adatoponav_l_preview.jpg)](docs/videos/adatoponav_l_demo.mp4) | Success at 235.125 s; 0 collisions; final goal distance 1.621 m. |
+| Original GNM | [![Play Original GNM L-shaped navigation online](docs/videos/gnm_l_preview.gif)](https://cdn.jsdelivr.net/gh/helpsds/AdaTopoNav@c12c81b/docs/videos/gnm_l_demo.mp4) | Timeout at 300 s; final goal distance 20.185 m. |
+| AdaTopoNav (M+V+C) | [![Play AdaTopoNav L-shaped navigation online](docs/videos/adatoponav_l_preview.gif)](https://cdn.jsdelivr.net/gh/helpsds/AdaTopoNav@c12c81b/docs/videos/adatoponav_l_demo.mp4) | Success at 235.125 s; 0 collisions; final goal distance 1.621 m. |
 
-The overlays show wall-clock trial time and odometry. Recording samples the camera at up to 5 fps, so video playback duration can be shorter than the elapsed trial time when Gazebo delivers fewer frames.
+If the CDN is unavailable, download the original files from the repository: [Original GNM](docs/videos/gnm_l_demo.mp4) or [AdaTopoNav](docs/videos/adatoponav_l_demo.mp4). The overlays show wall-clock trial time and odometry. Recording samples the camera at up to 5 fps, so video playback duration can be shorter than the elapsed trial time when Gazebo delivers fewer frames.
 
 ## 1. Prerequisites and environment
 
