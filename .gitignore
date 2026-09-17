@@ -6,6 +6,7 @@ train/gnm_dataset/*
 *_test.yaml
 
 *.png
+!docs/figures/*.png
 *.jpg
 *.pth
 *.pt
